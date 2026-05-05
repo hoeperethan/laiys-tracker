@@ -10,7 +10,7 @@
 require('dotenv').config();
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
-const { classify } = require('./patterns.js');
+const { classifyFull } = require('./patterns.js');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -81,7 +81,7 @@ async function handleLine(raw) {
   const message  = match[2].trim();
   if (!message) return;
 
-  const result = classify(message);
+  const result = await classifyFull(message);
   if (!result.type) return;
 
   console.log(`[${result.type.toUpperCase()}] ${username}: ${message}`);
