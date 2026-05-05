@@ -1,0 +1,14 @@
+{
+  "name": "laiys-tracker",
+  "version": "1.0.0",
+  "description": "Real-time W/L detector for stableronaldo Twitch chat",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.4",
+    "dotenv": "^16.5.0",
+    "ws": "^8.18.2"
+  }
+}

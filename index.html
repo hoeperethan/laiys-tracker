@@ -6,6 +6,7 @@
 <title>laiys tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="patterns.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -253,7 +254,7 @@ nav{
 
   <div class="cols">
 
-    <!-- LEFT: Live Chat -->
+    <!-- LEFT: Live Chat (all messages, direct Twitch IRC) -->
     <div class="col">
       <div class="panel">
         <div class="panel-header">
@@ -268,49 +269,48 @@ nav{
       </div>
     </div>
 
-    <!-- MIDDLE: W feed + L feed -->
+    <!-- MIDDLE: W feed + L feed (from Supabase real-time) -->
     <div class="col col-mid">
       <div class="panel-half">
         <div class="panel-header">
           <span class="panel-title green">W laiys</span>
-          <span class="count-chip green" id="wTotal">0</span>
+          <span class="count-chip green" id="wTotal">—</span>
         </div>
         <div class="feed" id="wFeed">
-          <div class="board-empty">waiting for W's...</div>
+          <div class="board-empty">loading...</div>
         </div>
       </div>
       <div class="panel-half">
         <div class="panel-header">
           <span class="panel-title red">L laiys</span>
-          <span class="count-chip red" id="lTotal">0</span>
+          <span class="count-chip red" id="lTotal">—</span>
         </div>
         <div class="feed" id="lFeed">
-          <div class="board-empty">waiting for L's...</div>
+          <div class="board-empty">loading...</div>
         </div>
       </div>
     </div>
 
-    <!-- RIGHT: Leaderboard -->
+    <!-- RIGHT: Leaderboard (from Supabase) -->
     <div class="col right-col">
       <div class="board-half">
         <div class="panel-header">
           <span class="panel-title green">top glazers</span>
           <div style="display:flex;gap:6px;align-items:center">
-            <span class="count-chip muted" id="wBoardCount">0</span>
-            <button class="btn-reset" onclick="resetAll()">reset</button>
+            <span class="count-chip muted" id="wBoardCount">—</span>
           </div>
         </div>
         <div class="board-scroll">
-          <div id="wBoard"><div class="board-empty">no data yet</div></div>
+          <div id="wBoard"><div class="board-empty">loading...</div></div>
         </div>
       </div>
       <div class="board-half">
         <div class="panel-header">
           <span class="panel-title red">top haters</span>
-          <span class="count-chip muted" id="lBoardCount">0</span>
+          <span class="count-chip muted" id="lBoardCount">—</span>
         </div>
         <div class="board-scroll">
-          <div id="lBoard"><div class="board-empty">no data yet</div></div>
+          <div id="lBoard"><div class="board-empty">loading...</div></div>
         </div>
       </div>
     </div>
@@ -321,28 +321,129 @@ nav{
 <div class="toast" id="toast"></div>
 
 <script>
+// ─── Supabase ─────────────────────────────────────────────
+const SUPABASE_URL  = 'https://zglvndxmvmfzaxrlhoht.supabase.co';
+const SUPABASE_ANON = 'sb_publishable_zHmNrleng6boCU5HRfKANA_s60bwOEo';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+console.log('[supabase] client created');
+
 // ─── State ────────────────────────────────────────────────
 let ws = null;
 let connected = false;
-let wCounts = {}, lCounts = {};
-let wTotal = 0, lTotal = 0;
-let chatEmpty = true, wEmpty = true, lEmpty = true;
+let chatEmpty = true;
 
-// ─── Connect ─────────────────────────────────────────────
+// ─── Supabase: initial load + real-time ──────────────────
+async function initSupabase() {
+  await Promise.all([
+    loadFeed('w'),
+    loadFeed('l'),
+    refreshLeaderboard(),
+  ]);
+
+  // Real-time: new mention inserted by bot.js
+  sb.channel('mentions-rt')
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'mentions',
+    }, (payload) => {
+      console.log('[supabase] realtime INSERT received:', payload);
+      const row = payload.new;
+      const t = formatTime(row.created_at);
+      prependMsg(row.type === 'w' ? 'wFeed' : 'lFeed', row.username, row.message, row.type, t);
+      refreshLeaderboard();
+    })
+    .subscribe((status, err) => {
+      console.log('[supabase] subscription status:', status, err || '');
+    });
+}
+
+async function loadFeed(type) {
+  const feedId = type === 'w' ? 'wFeed' : 'lFeed';
+  console.log(`[supabase] loadFeed(${type}) — querying...`);
+  const { data, error } = await sb
+    .from('mentions')
+    .select('username, message, created_at')
+    .eq('type', type)
+    .order('created_at', { ascending: false })
+    .limit(60);
+
+  const feed = document.getElementById(feedId);
+
+  if (error) {
+    console.error(`[supabase] loadFeed(${type}) error:`, error.message, '| code:', error.code, '| hint:', error.hint);
+    feed.innerHTML = `<div class="board-empty">error loading feed — check console</div>`;
+    return;
+  }
+
+  console.log(`[supabase] loadFeed(${type}) got ${data?.length ?? 0} rows`);
+
+  if (!data?.length) {
+    feed.innerHTML = `<div class="board-empty">no ${type === 'w' ? 'W' : 'L'}'s yet</div>`;
+    return;
+  }
+
+  feed.innerHTML = '';
+  data.forEach(row => {
+    appendMsgBottom(feedId, row.username, row.message, type, formatTime(row.created_at));
+  });
+}
+
+async function refreshLeaderboard() {
+  console.log('[supabase] refreshLeaderboard — calling RPC...');
+  const [wRes, lRes] = await Promise.all([
+    sb.rpc('get_leaderboard', { mention_type: 'w', lim: 15 }),
+    sb.rpc('get_leaderboard', { mention_type: 'l', lim: 15 }),
+  ]);
+
+  if (wRes.error) console.error('[supabase] get_leaderboard(w) error:', wRes.error.message, '| code:', wRes.error.code, '| hint:', wRes.error.hint);
+  if (lRes.error) console.error('[supabase] get_leaderboard(l) error:', lRes.error.message, '| code:', lRes.error.code, '| hint:', lRes.error.hint);
+
+  console.log('[supabase] leaderboard W rows:', wRes.data?.length ?? 0, '| L rows:', lRes.data?.length ?? 0);
+
+  renderBoardData('w', wRes.data || []);
+  renderBoardData('l', lRes.data || []);
+}
+
+function renderBoardData(type, rows) {
+  const el    = document.getElementById(type === 'w' ? 'wBoard' : 'lBoard');
+  const total = document.getElementById(type === 'w' ? 'wTotal' : 'lTotal');
+  const count = document.getElementById(type === 'w' ? 'wBoardCount' : 'lBoardCount');
+  const cls   = type === 'w' ? 'green' : 'red';
+
+  const sum = rows.reduce((acc, r) => acc + Number(r.mentions), 0);
+  total.textContent = sum;
+  count.textContent = rows.length;
+
+  if (!rows.length) {
+    el.innerHTML = '<div class="board-empty">no data yet</div>';
+    return;
+  }
+
+  const rankClasses = ['gold', 'silver', 'bronze'];
+  el.innerHTML = rows.map((r, i) => `
+    <div class="entry">
+      <span class="rank ${rankClasses[i] || ''}">#${i + 1}</span>
+      <div class="avatar ${cls}">${esc(r.username).slice(0, 2).toUpperCase()}</div>
+      <span class="entry-name">${esc(r.username)}</span>
+      <span class="entry-score ${cls}">${r.mentions}</span>
+    </div>`).join('');
+}
+
+// ─── Twitch IRC (left panel: all messages) ───────────────
 function connect(channel) {
   setStatus('connecting', 'connecting...');
   ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
 
   ws.onopen = () => {
     ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
-    const id = Math.floor(Math.random() * 99999) + 10000;
+    const id = Math.floor(Math.random() * 89999) + 10000;
     ws.send(`PASS oauth:justinfan${id}`);
     ws.send(`NICK justinfan${id}`);
     ws.send(`JOIN #${channel}`);
   };
 
   ws.onmessage = (e) => {
-    // Twitch batches multiple IRC lines per frame — split and process each
     const lines = e.data.split('\r\n');
     for (const line of lines) {
       const raw = line.trim();
@@ -353,7 +454,7 @@ function connect(channel) {
         setStatus('live', channel);
         document.getElementById('liveBadge').classList.add('show');
       }
-      parseMessage(raw);
+      parseChatLine(raw);
     }
   };
 
@@ -365,104 +466,52 @@ function connect(channel) {
   };
 }
 
-// ─── Parse IRC message ────────────────────────────────────
-function parseMessage(raw) {
-  // Extract display-name from IRCv3 tags
+function parseChatLine(raw) {
   let displayName = null;
   if (raw.startsWith('@')) {
-    const spaceIdx = raw.indexOf(' ');
-    const tags = raw.slice(1, spaceIdx);
+    const tags = raw.slice(1, raw.indexOf(' '));
     const dn = tags.match(/display-name=([^;]+)/);
     if (dn && dn[1]) displayName = dn[1];
   }
 
-  const privmsgMatch = raw.match(/:([^!]+)![^\s]+ PRIVMSG #[^\s]+ :(.+)/);
-  if (!privmsgMatch) return;
+  const match = raw.match(/:([^!]+)![^\s]+ PRIVMSG #[^\s]+ :(.+)/);
+  if (!match) return;
 
-  const user = displayName || privmsgMatch[1];
-  const text = privmsgMatch[2].trim();
+  const user = displayName || match[1];
+  const text = match[2].trim();
   if (!text) return;
 
   const result = TrackerPatterns.classify(text);
-  const now = Date.now();
-  const timeStr = new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const t = formatTime(new Date().toISOString());
 
-  // Always add to live chat
-  addMsg('chatFeed', user, text, result.type, timeStr, 'chat');
-
-  if (result.type === 'w') {
-    wCounts[user] = (wCounts[user] || 0) + 1;
-    wTotal++;
-    document.getElementById('wTotal').textContent = wTotal;
-    addMsg('wFeed', user, text, 'w', timeStr, 'wl');
-    renderBoard('w');
-  } else if (result.type === 'l') {
-    lCounts[user] = (lCounts[user] || 0) + 1;
-    lTotal++;
-    document.getElementById('lTotal').textContent = lTotal;
-    addMsg('lFeed', user, text, 'l', timeStr, 'wl');
-    renderBoard('l');
-  }
+  // All messages → left chat feed
+  prependMsg('chatFeed', user, text, result.type, t, true);
 }
 
-// ─── Add message to a feed ───────────────────────────────
-function addMsg(feedId, user, text, type, timeStr, mode) {
+// ─── Feed helpers ─────────────────────────────────────────
+// Prepend (newest on top)
+function prependMsg(feedId, user, text, type, t, isChatFeed) {
   const feed = document.getElementById(feedId);
-
-  // Clear placeholder on first real message
-  if (feedId === 'chatFeed' && chatEmpty) { feed.innerHTML = ''; chatEmpty = false; }
-  if (feedId === 'wFeed' && wEmpty)       { feed.innerHTML = ''; wEmpty = false; }
-  if (feedId === 'lFeed' && lEmpty)       { feed.innerHTML = ''; lEmpty = false; }
+  if (isChatFeed && chatEmpty) { feed.innerHTML = ''; chatEmpty = false; }
+  else if (!isChatFeed && feed.querySelector('.board-empty')) feed.innerHTML = '';
 
   const div = document.createElement('div');
   div.className = type ? `msg ${type}-msg` : 'msg';
-  div.innerHTML = (type && mode === 'chat')
-    ? `<span class="msg-badge ${type}">${type.toUpperCase()}</span><span class="msg-user">${esc(user)}</span><span class="msg-text">${esc(text)}</span><span class="msg-time">${timeStr}</span>`
-    : `<span class="msg-user">${esc(user)}</span><span class="msg-text">${esc(text)}</span><span class="msg-time">${timeStr}</span>`;
+  div.innerHTML = (type && isChatFeed)
+    ? `<span class="msg-badge ${type}">${type.toUpperCase()}</span><span class="msg-user">${esc(user)}</span><span class="msg-text">${esc(text)}</span><span class="msg-time">${t}</span>`
+    : `<span class="msg-user">${esc(user)}</span><span class="msg-text">${esc(text)}</span><span class="msg-time">${t}</span>`;
 
   feed.insertBefore(div, feed.firstChild);
   while (feed.children.length > 150) feed.removeChild(feed.lastChild);
 }
 
-// ─── Leaderboard ─────────────────────────────────────────
-function renderBoard(type) {
-  const counts = type === 'w' ? wCounts : lCounts;
-  const el = document.getElementById(type === 'w' ? 'wBoard' : 'lBoard');
-  const countEl = document.getElementById(type === 'w' ? 'wBoardCount' : 'lBoardCount');
-  const cls = type === 'w' ? 'green' : 'red';
-
-  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 15);
-  countEl.textContent = Object.keys(counts).length;
-
-  el.innerHTML = sorted.map(([user, count], i) => {
-    const initials = user.slice(0, 2).toUpperCase();
-    const rankClasses = ['gold', 'silver', 'bronze'];
-    const rankClass = i < 3 ? rankClasses[i] : '';
-    const rankLabel = `#${i + 1}`;
-    return `<div class="entry">
-      <span class="rank ${rankClass}">${rankLabel}</span>
-      <div class="avatar ${cls}">${initials}</div>
-      <span class="entry-name">${esc(user)}</span>
-      <span class="entry-score ${cls}">${count}</span>
-    </div>`;
-  }).join('');
-}
-
-// ─── Reset ────────────────────────────────────────────────
-function resetAll() {
-  wCounts = {}; lCounts = {};
-  wTotal = 0; lTotal = 0;
-  document.getElementById('wTotal').textContent = '0';
-  document.getElementById('lTotal').textContent = '0';
-  document.getElementById('wBoardCount').textContent = '0';
-  document.getElementById('lBoardCount').textContent = '0';
-  document.getElementById('wBoard').innerHTML = '<div class="board-empty">no data yet</div>';
-  document.getElementById('lBoard').innerHTML = '<div class="board-empty">no data yet</div>';
-  document.getElementById('wFeed').innerHTML = '<div class="board-empty">waiting for W\'s...</div>';
-  document.getElementById('lFeed').innerHTML = '<div class="board-empty">waiting for L\'s...</div>';
-  document.getElementById('chatFeed').innerHTML = '<div class="board-empty">still connected — chat incoming...</div>';
-  chatEmpty = true; wEmpty = true; lEmpty = true;
-  toast('stats reset');
+// Append (for historical load, newest already at top from query)
+function appendMsgBottom(feedId, user, text, type, t) {
+  const feed = document.getElementById(feedId);
+  const div = document.createElement('div');
+  div.className = `msg ${type}-msg`;
+  div.innerHTML = `<span class="msg-user">${esc(user)}</span><span class="msg-text">${esc(text)}</span><span class="msg-time">${t}</span>`;
+  feed.appendChild(div);
 }
 
 // ─── Status ──────────────────────────────────────────────
@@ -481,16 +530,21 @@ function toast(msg) {
   setTimeout(() => el.classList.remove('show'), 2500);
 }
 
-// ─── Escape HTML ─────────────────────────────────────────
+// ─── Utils ───────────────────────────────────────────────
 function esc(s) {
   return String(s)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// Auto-connect on load
+function formatTime(iso) {
+  return new Date(iso).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+}
+
+// ─── Boot ─────────────────────────────────────────────────
+initSupabase();
 connect('stableronaldo');
 </script>
 </body>
