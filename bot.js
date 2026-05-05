@@ -4,18 +4,19 @@
 //  and saves them to Supabase.
 //
 //  Run: node bot.js
-//  Env vars: SUPABASE_URL, SUPABASE_KEY, CHANNEL, ANTHROPIC_API_KEY
+//  Env vars: SUPABASE_URL, SUPABASE_KEY, CHANNEL, GEMINI_API_KEY
 // ============================================================
 
 require('dotenv').config();
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
-const Anthropic = require('@anthropic-ai/sdk');
 const { classify, KEYWORD_RE } = require('./patterns.js');
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const CHANNEL      = process.env.CHANNEL || 'stableronaldo';
+const SUPABASE_URL  = process.env.SUPABASE_URL;
+const SUPABASE_KEY  = process.env.SUPABASE_KEY;
+const CHANNEL       = process.env.CHANNEL || 'stableronaldo';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyDzgzzbiyQCdlFBbREiDDGBFUz__Ftnr_M';
+const GEMINI_URL    = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error('[bot] SUPABASE_URL and SUPABASE_KEY env vars are required');
@@ -26,47 +27,44 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-// Initialize Anthropic client (null if no API key — AI fallback is optional)
-const ai = process.env.ANTHROPIC_API_KEY
-  ? new Anthropic.default({ apiKey: process.env.ANTHROPIC_API_KEY })
-  : null;
-
-if (!ai) {
-  console.warn('[bot] ANTHROPIC_API_KEY not set — AI sentiment fallback disabled');
-}
-
 let reconnectDelay = 2000;
 
 /**
- * Claude AI sentiment fallback.
+ * Gemini AI sentiment fallback.
  * Called only when the regex patterns return no match and the message
  * contains a relevant keyword (laiys / lays / cam / cameraman).
  * Returns { type: 'w'|'l'|null }
  */
 async function aiClassify(text) {
-  if (!ai) return { type: null };
   try {
-    const response = await ai.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 10,
-      system:
-        'You classify Twitch chat messages as positive or negative about a streamer named "laiys" ' +
-        '(also known as lays, cam, cameraman). ' +
-        'Reply with exactly one word: "positive" or "negative". No explanation, no punctuation.',
-      messages: [{ role: 'user', content: text }],
+    const res = await fetch(GEMINI_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{
+            text: `Is this chat message positive or negative about laiys? Reply with only W for positive or L for negative.\n\nMessage: ${text}`,
+          }],
+        }],
+      }),
     });
-    const answer = response.content?.[0]?.text?.trim().toLowerCase() ?? '';
-    if (answer.startsWith('pos')) return { type: 'w' };
-    if (answer.startsWith('neg')) return { type: 'l' };
+    if (!res.ok) {
+      console.error('[ai] Gemini HTTP error:', res.status, await res.text());
+      return { type: null };
+    }
+    const json = await res.json();
+    const answer = (json.candidates?.[0]?.content?.parts?.[0]?.text ?? '').trim().toUpperCase();
+    if (answer.startsWith('W')) return { type: 'w' };
+    if (answer.startsWith('L')) return { type: 'l' };
     return { type: null };
   } catch (err) {
-    console.error('[ai] classify error:', err.message);
+    console.error('[ai] Gemini classify error:', err.message);
     return { type: null };
   }
 }
 
 /**
- * Full classifier: fast regex first, Claude AI fallback if unmatched.
+ * Full classifier: fast regex first, Gemini fallback if unmatched.
  * Returns { type: 'w'|'l'|null, score, matched, source }
  */
 async function classifyFull(text) {
@@ -76,7 +74,7 @@ async function classifyFull(text) {
   // Only call AI if the message contains a relevant keyword
   if (!KEYWORD_RE.test(text)) return { ...result, source: 'regex' };
 
-  const ai = await aiClassify(text);
+  const ai = await aiClassify(text); // Gemini fallback
   if (ai.type) {
     console.log(`[ai] fallback classified as ${ai.type.toUpperCase()}: ${text}`);
     return { type: ai.type, score: 1, matched: ['[AI]'], source: 'ai' };
