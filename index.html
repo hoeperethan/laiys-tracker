@@ -489,7 +489,6 @@ function parseChatLine(raw) {
 }
 
 // ─── Feed helpers ─────────────────────────────────────────
-// Prepend (newest on top)
 function prependMsg(feedId, user, text, type, t, isChatFeed) {
   const feed = document.getElementById(feedId);
   if (isChatFeed && chatEmpty) { feed.innerHTML = ''; chatEmpty = false; }
@@ -501,8 +500,16 @@ function prependMsg(feedId, user, text, type, t, isChatFeed) {
     ? `<span class="msg-badge ${type}">${type.toUpperCase()}</span><span class="msg-user">${esc(user)}</span><span class="msg-text">${esc(text)}</span><span class="msg-time">${t}</span>`
     : `<span class="msg-user">${esc(user)}</span><span class="msg-text">${esc(text)}</span><span class="msg-time">${t}</span>`;
 
-  feed.insertBefore(div, feed.firstChild);
-  while (feed.children.length > 150) feed.removeChild(feed.lastChild);
+  if (isChatFeed) {
+    // Chat: newest at bottom, auto-scroll down
+    feed.appendChild(div);
+    while (feed.children.length > 150) feed.removeChild(feed.firstChild);
+    requestAnimationFrame(() => { feed.scrollTop = feed.scrollHeight; });
+  } else {
+    // W/L feeds: newest at top
+    feed.insertBefore(div, feed.firstChild);
+    while (feed.children.length > 150) feed.removeChild(feed.lastChild);
+  }
 }
 
 // Append (for historical load, newest already at top from query)
