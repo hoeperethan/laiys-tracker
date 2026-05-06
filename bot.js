@@ -15,7 +15,7 @@ const { classify, KEYWORD_RE } = require('./patterns.js');
 const SUPABASE_URL  = process.env.SUPABASE_URL;
 const SUPABASE_KEY  = process.env.SUPABASE_KEY;
 const CHANNEL       = process.env.CHANNEL || 'stableronaldo';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyDzgzzbiyQCdlFBbREiDDGBFUz__Ftnr_M';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_URL    = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
