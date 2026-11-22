@@ -137,7 +137,17 @@ async function handleLine(raw) {
   if (!message) return;
 
   const result = await classifyFull(message);
-  if (!result.type) return;
+  if (!result.type) {
+    // Gemini was called but returned no clear W or L — save for manual labeling
+    if (result.source === 'none') {
+      const { error: uErr } = await supabase
+        .from('unlabeled_messages')
+        .insert({ username, message });
+      if (uErr) console.error('[bot] unlabeled insert error:', uErr.message);
+      else console.log('[bot] unlabeled saved:', username, '|', message);
+    }
+    return;
+  }
 
   console.log(`[${result.type.toUpperCase()}] (${result.source}) ${username}: ${message}`);
 
